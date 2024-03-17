@@ -14,7 +14,10 @@ parser.add_argument('--R', type=int, default=128, help='head dimension')
 args = parser.parse_args()
 
 def KVCacheAttention(
-    q :torch.FloatTensor,
+    x :torch.FloatTensor,
+    wq:torch.FloatTensor,
+    wk:torch.FloatTensor,
+    wv:torch.FloatTensor,
     k :torch.FloatTensor,
     v :torch.FloatTensor,
     batch_size :int,
@@ -22,24 +25,69 @@ def KVCacheAttention(
     num_head :int,
     head_dim :int,
 ):  
-    weight = torch.matmul(q, k.transpose(2,3))
-    weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(q.dtype)
-    attn_output = torch.matmul(weight, v)
+    
+    q = torch.matmul(x, wq)
+    dk = torch.matmul(x, wk)
+    dv = torch.matmul(x, wv)
 
+    q = q.view(batch_size, 1, num_head, head_dim).transpose(1,2)
+    dk = dk.view(batch_size, 1, num_head, head_dim).transpose(1,2)
+    dv = dv.view(batch_size, 1, num_head, head_dim).transpose(1,2)
+
+    
+    k[...,-1:, :].copy_(dk)
+    v[...,-1:, :].copy_(dv)
+    
+    weight = torch.matmul(q, k.transpose(2,3))
+    
+    
+    weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(q.dtype)
+
+    
+    attn_output = torch.matmul(weight, v).transpose(1,2).view(batch_size, 1, num_head * head_dim)
+
+    
     return attn_output
 
 def ReAttention(
     x :torch.FloatTensor,
     y :torch.FloatTensor,
+    wq:torch.FloatTensor,
+    wk:torch.FloatTensor,
+    wv:torch.FloatTensor,
     batch_size :int,
     seq_len :int,
     num_head :int,
     head_dim :int,
 ):  
+    
+    x[...,-1,:].copy_(y)
+    y = torch.matmul(y, wq)
+    y = y.view(batch_size, num_head, 1, head_dim)
+
+    
+    wk = wk.T.view(num_head, head_dim, num_head * head_dim)
+
+    y = torch.matmul(y, wk).transpose(1,2)
+
+    
     weight = torch.matmul(y, x.transpose(2,3))
+
+    
     weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(y.dtype)
-    attn_output = torch.matmul(weight, x)
-   
+
+    
+    
+    
+    
+    attn_output = torch.matmul(weight, x).transpose(1,2)
+    
+    
+    wv = wv.view(num_head * head_dim, num_head, head_dim).transpose(0,1)
+
+    attn_output = torch.matmul(attn_output, wv).transpose(1,2).view(batch_size, 1, num_head * head_dim)
+
+    
     return attn_output
 
 
@@ -147,39 +195,86 @@ T = args.T
 dtype = torch.float16
 device = "cuda:0"
 if args.alg == 'kv':
-    q = torch.rand((B, N, 1, R), dtype=dtype, device=device)
+    x = torch.rand((B, 1, N * R), dtype=dtype, device=device)
     k = torch.rand((B, N, S, R), dtype=dtype, device=device)
     v = torch.rand((B, N, S, R), dtype=dtype, device=device)
 
+    wq = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wk = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wv = torch.rand((N * R, N * R), dtype=dtype, device=device)
     #graph = capture_cuda_graph_for_kvcacheattention(B, S, N, R, dtype=dtype, device=device)
 
     for _ in range(10):
-        h = KVCacheAttention(q,k,v, B, S, N, R)
+        h = KVCacheAttention(x,wq, wk, wv, k,v, B, S, N, R)
     
     torch.cuda.synchronize()
     t1 = time.time()
     for _ in range(T):
-       h = KVCacheAttention(q,k,v, B, S, N, R)
+       h = KVCacheAttention(x,wq, wk, wv, k,v, B, S, N, R)
     torch.cuda.synchronize()
     t2 = time.time()
     print("BatchSize :{}, Seq Len:{}, Num Head:{}, Head Dim:{}, Time: {}".format(B, S, N, R, (t2 - t1)/ T))
 
 
 
-if args.alg == 're':
+elif args.alg == 're':
     x = torch.rand((B, 1, S, N * R), dtype=dtype, device=device)
-    y = torch.rand((B, 1, N, N * R), dtype=dtype, device=device)
+    y = torch.rand((B, 1, N * R), dtype=dtype, device=device)
 
 
+    wq = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wk = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wv = torch.rand((N * R, N * R), dtype=dtype, device=device)
     for _ in range(10):
-        h = ReAttention(x,y,B, S, N, R)
+        h = ReAttention(x,y,wq, wk, wv,B, S, N, R)
     
     torch.cuda.synchronize()
     t1 = time.time()
     for _ in range(T):
-        h = ReAttention(x,y,B, S, N, R)
+        h = ReAttention(x,y,wq, wk, wv,B, S, N, R)
     torch.cuda.synchronize()
     t2 = time.time()
     print("BatchSize :{}, Seq Len:{}, Num Head:{}, Head Dim:{}, Time: {}".format(B, S, N, R, (t2 - t1)/ T))
+
+elif args.alg == 'verify':
+
+    B = 1
+    S = 7
+    dtype = torch.float32
+    x = torch.rand((B, 1, S, N * R), dtype=dtype, device=device) -0.5
+    y = torch.rand((B, 1, N * R), dtype=dtype, device=device)-0.5
+
+
+    wq = torch.rand((N * R, N * R), dtype=dtype, device=device)-0.5
+    wk = torch.rand((N * R, N * R), dtype=dtype, device=device)-0.5
+    wv = torch.rand((N * R, N * R), dtype=dtype, device=device)-0.5
+
+    # torch.save(y, "y.pt")
+    # torch.save(x, "x.pt")
+    # torch.save(wq, "wq.pt")
+    # torch.save(wk, "wk.pt")
+    # torch.save(wv, "wv.pt")
+
+    #exit(0)
+    # x :torch.Tensor = torch.load("x.pt")
+    # y :torch.Tensor= torch.load("y.pt")
+
+
+    # wq :torch.Tensor= torch.load("wq.pt")
+    # wk :torch.Tensor= torch.load("wk.pt")
+    # wv :torch.Tensor= torch.load("wv.pt")
+
+    k = torch.matmul(x, wk).squeeze(1).view(B, S, N, R).transpose(1,2)
+    v = torch.matmul(x, wv).squeeze(1).view(B, S, N, R).transpose(1,2)
+
+    result1 = ReAttention(x,y, wq, wk, wv, B, S, N, R)
+    result2 = KVCacheAttention(y, wq, wk, wv, k, v, B, S, N, R)
+
+    avg_delta = torch.abs(result1 - result2).sum() / (N * R)
+    print(avg_delta)
+    
+
+
+
 
 
