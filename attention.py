@@ -38,7 +38,7 @@ def KVCacheAttention(
     k[...,-1:, :].copy_(dk)
     v[...,-1:, :].copy_(dv)
     
-    weight = torch.matmul(q, k.transpose(2,3))
+    weight = torch.matmul(q, k.transpose(2,3)) / math.sqrt(head_dim)
     
     
     weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(q.dtype)
@@ -71,7 +71,7 @@ def ReAttention(
     y = torch.matmul(y, wk).transpose(1,2)
 
     
-    weight = torch.matmul(y, x.transpose(2,3))
+    weight = torch.matmul(y, x.transpose(2,3)) / math.sqrt(head_dim)
 
     
     weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(y.dtype)
@@ -90,6 +90,46 @@ def ReAttention(
     
     return attn_output
 
+def KAttention(
+    k :torch.FloatTensor,
+    y :torch.FloatTensor,
+    wq:torch.FloatTensor,
+    wk:torch.FloatTensor,
+    wv:torch.FloatTensor,
+    batch_size :int,
+    seq_len :int,
+    num_head :int,
+    head_dim :int,
+):  
+    q = torch.matmul(y, wq)
+    dk = torch.matmul(y, wk)
+
+    q = q.view(batch_size, 1, num_head, head_dim).transpose(1,2)
+    dk = dk.view(batch_size, 1, num_head, head_dim).transpose(1,2)
+
+    k[...,-1:, :].copy_(dk)
+
+    
+    weight = torch.matmul(q, k.transpose(2,3)) / math.sqrt(head_dim)
+
+    
+    
+    weight = F.softmax(weight, dim=-1, dtype=torch.float32).to(y.dtype).transpose(1,2)
+
+    
+    
+    
+    
+    attn_output = torch.matmul(weight, k.transpose(1,2).view(batch_size, seq_len, num_head * head_dim).unsqueeze(1)).transpose(1,2)
+    
+    
+    
+    wv = wv.view(num_head * head_dim, num_head, head_dim).transpose(0,1)
+    
+    attn_output = torch.matmul(attn_output, wv).transpose(1,2).view(batch_size, 1, num_head * head_dim)
+
+    
+    return attn_output
 
 def capture_cuda_graph_for_kvcacheattention(
     batch_size :int,
@@ -215,6 +255,30 @@ if args.alg == 'kv':
     t2 = time.time()
     print("BatchSize :{}, Seq Len:{}, Num Head:{}, Head Dim:{}, Time: {}".format(B, S, N, R, (t2 - t1)/ T))
 
+elif args.alg == 'k':
+    #x = torch.rand((B, 1, S, N * R), dtype=dtype, device=device) -0.5
+    y = torch.rand((B, 1, N * R), dtype=dtype, device=device)-0.5
+    
+    
+
+    wq = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wk = torch.rand((N * R, N * R), dtype=dtype, device=device)
+    wv = torch.rand((N * R, N * R), dtype=dtype, device=device)
+
+    #k = torch.matmul(x, wk).squeeze(1).view(B, S, N, R).transpose(1,2)
+    k = torch.rand((B, S, N, R), dtype=dtype, device=device).transpose(1,2)
+    #graph = capture_cuda_graph_for_kvcacheattention(B, S, N, R, dtype=dtype, device=device)
+
+    for _ in range(10):
+        h = KAttention(k, y,wq, wk, wv, B, S, N, R)
+    
+    torch.cuda.synchronize()
+    t1 = time.time()
+    for _ in range(T):
+       h = KAttention(k, y,wq, wk, wv, B, S, N, R)
+    torch.cuda.synchronize()
+    t2 = time.time()
+    print("BatchSize :{}, Seq Len:{}, Num Head:{}, Head Dim:{}, Time: {}".format(B, S, N, R, (t2 - t1)/ T))
 
 
 elif args.alg == 're':
@@ -239,7 +303,7 @@ elif args.alg == 're':
 elif args.alg == 'verify':
 
     B = 1
-    S = 7
+    S = 256
     dtype = torch.float32
     x = torch.rand((B, 1, S, N * R), dtype=dtype, device=device) -0.5
     y = torch.rand((B, 1, N * R), dtype=dtype, device=device)-0.5
@@ -264,14 +328,25 @@ elif args.alg == 'verify':
     # wk :torch.Tensor= torch.load("wk.pt")
     # wv :torch.Tensor= torch.load("wv.pt")
 
+    wk_i = torch.inverse(wk)
+
+    wv_new = torch.matmul(wk_i, wv)
+
     k = torch.matmul(x, wk).squeeze(1).view(B, S, N, R).transpose(1,2)
     v = torch.matmul(x, wv).squeeze(1).view(B, S, N, R).transpose(1,2)
 
+    
+    result0 = KAttention(k, y, wq, wk, wv_new, B, S, N, R)
+    
     result1 = ReAttention(x,y, wq, wk, wv, B, S, N, R)
     result2 = KVCacheAttention(y, wq, wk, wv, k, v, B, S, N, R)
 
-    avg_delta = torch.abs(result1 - result2).sum() / (N * R)
-    print(avg_delta)
+    print(result0)
+    print(result1)
+    print(result2)
+    avg_delta0 = torch.abs(result0 - result2).sum() / (N * R)
+    avg_delta1 = torch.abs(result1 - result2).sum() / (N * R)
+    print(avg_delta0, avg_delta1)
     
 
 
