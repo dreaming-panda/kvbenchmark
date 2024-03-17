@@ -6,7 +6,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--alg', type=str, default="kv", help='algorithm')
 parser.add_argument('--T', type=int, default=10000, help='time')
 parser.add_argument('--B', type=int, default=1, help='batch size')
-parser.add_argument('--S', type=int, default=8192, help='sequence length')
+parser.add_argument('--S', type=int, default=1000000, help='sequence length')
 parser.add_argument('--N', type=int, default=32, help='num heads')
 parser.add_argument('--R', type=int, default=128, help='head dimension')
 args = parser.parse_args()
@@ -51,25 +51,20 @@ if local_rank == 0:
     print("Reduce Time: {}".format((t2 - t1)/ T))
 
 for _ in range(10):
-    if local_rank == 0:
-        dist.gather(tensor, gather_tensor)
-    else:
-        dist.gather(tensor)
+    dist.all_gather(gather_tensor, tensor)
 
 torch.cuda.synchronize()
 t1 = time.time()
 
 for _ in range(T):
-    if local_rank == 0:
-        dist.gather(tensor, gather_tensor)
-    else:
-        dist.gather(tensor)
+    
+    dist.all_gather(gather_tensor, tensor)
 
 torch.cuda.synchronize()
 t2 = time.time()
 
 if local_rank == 0:
-    print("Gather: {}".format((t2 - t1)/ T))
+    print("All Gather: {}".format((t2 - t1)/ T))
 
 
 
